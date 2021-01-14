@@ -10,6 +10,8 @@ from mycodo.databases.models import OutputChannel
 from mycodo.outputs.base_output import AbstractOutput
 from mycodo.utils.database import db_retrieve_table_daemon
 
+import time
+
 def execute_at_modification(
         mod_output,
         request_form,
@@ -182,7 +184,6 @@ class OutputModule(AbstractOutput):
         self.red = 255
         self.green = 255
         self.blue = 255
-        self.bus = None
         self.shutdown_state = 'off'
 
         output_channels = db_retrieve_table_daemon(
@@ -191,24 +192,16 @@ class OutputModule(AbstractOutput):
             OUTPUT_INFORMATION['custom_channel_options'], output_channels)
 
     def setup_output(self):
-        from smbus2 import SMBus
-
         self.setup_on_off_output(OUTPUT_INFORMATION)
 
-        try:
-            self.address = int(str(self.output.i2c_location), 16)
-            self.red = self.options_channels['red'][0]
-            self.green = self.options_channels['green'][0]
-            self.blue = self.options_channels['blue'][0]
-            self.bus = SMBus(self.output.i2c_bus)
-            if self.options_channels['state_shutdown'][0] == 1:
-                self.shutdown_state = 'on'
-            else:
-                self.shutdown_state = 'off'
-
-        except Exception as except_msg:
-            self.logger.exception("Cannot open i2c port")
-            return
+        self.address = int(str(self.output.i2c_location), 16)
+        self.red = self.options_channels['red'][0]
+        self.green = self.options_channels['green'][0]
+        self.blue = self.options_channels['blue'][0]
+        if self.options_channels['state_shutdown'][0] == 1:
+            self.shutdown_state = 'on'
+        else:
+            self.shutdown_state = 'off'
 
         self.logger.debug("I2C: Address: {}, Bus: {}".format(self.output.i2c_location, self.output.i2c_bus))
 
@@ -243,20 +236,53 @@ class OutputModule(AbstractOutput):
         try:
             if state == 'on':
                 self.state = True
-                self.bus.write_i2c_block_data(self.address, 100, [self.red, self.green, self.blue])
+                self.write_block(100, [self.red, self.green, self.blue])
             elif state == 'off':
                 self.state = False
                 self.logger.debug("Setting LEDs off at address {}".format(self.address))
-                self.bus.write_i2c_block_data(self.address, 100, [0, 0, 0])
+                self.write_block(100, [0, 0, 0])
             msg = "success"
         except Exception as e:
             msg = "State change error: {}".format(e)
             self.logger.exception(msg)
         return msg
 
+    def write_block(self, cmd, data):
+        from smbus2 import SMBus
+        counter = 3
+        bus = None
+        msg = ""
+
+        try:
+            self.logger.debug("Opening I2C port")
+            bus = SMBus(self.output.i2c_bus)
+        except Exception as e:
+            msg = "Error opening I2C port: {}".format(e)
+            self.logger.exception(msg)
+            raise Exception(msg)
+
+        while counter > 0:
+            try:
+                self.logger.debug("Writing to I2C address {} and command {}".format(self.address, cmd))
+                bus.write_i2c_block_data(self.address, cmd, data)
+                self.logger.debug("I2C block successfully written.")
+                break
+            except Exception as e:
+                counter -= 1
+                if counter <= 0:
+                    msg = "Error writing I2C block to address {}: {}".format(self.address, e)
+                    self.logger.exception(msg)
+                    bus.close()
+                    raise Exception(msg)
+                else:
+                    time.sleep(0.005)
+        bus.close()
+
     def is_on(self, output_channel=0):
         if self.is_setup():
             return self.state
+        else:
+            return False
 
     def is_setup(self):
         return self.output_setup

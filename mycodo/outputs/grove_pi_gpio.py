@@ -8,6 +8,7 @@ from flask_babel import lazy_gettext
 from mycodo.databases.models import OutputChannel
 from mycodo.outputs.base_output import AbstractOutput
 from mycodo.utils.database import db_retrieve_table_daemon
+import time
 
 
 def execute_at_modification(
@@ -77,7 +78,7 @@ channels_dict = {
 
 # Output information
 OUTPUT_INFORMATION = {
-    'output_name_unique': 'grove_pio_gpio',
+    'output_name_unique': 'grove_pi_gpio',
     'output_name': "Grove Pi GPIO: {}".format(lazy_gettext('On/Off')),
     'output_library': 'smbus2',
     'measurements_dict': measurements_dict,
@@ -185,7 +186,6 @@ class OutputModule(AbstractOutput):
     def __init__(self, output, testing=False):
         super(OutputModule, self).__init__(output, testing=testing, name=__name__)
 
-        self.bus = None
         self.address = 0x04
 
         output_channels = db_retrieve_table_daemon(
@@ -200,13 +200,10 @@ class OutputModule(AbstractOutput):
 
         try:
             self.address = int(str(self.output.i2c_location), 16)
-            self.bus = SMBus(self.output.i2c_bus)
             if self.options_channels['state_shutdown'][0] == 1:
                 self.shutdown_state = 'on'
             else:
                 self.shutdown_state = 'off'
-
-
         except Exception as except_msg:
             self.logger.exception("Cannot open i2c port")
             return
@@ -219,7 +216,6 @@ class OutputModule(AbstractOutput):
         if self.options_channels['pin'][0] is None:
             self.logger.error("Pin must be set")
         else:
-
             try:
                 if self.options_channels['state_startup'][0]:
                     startup_state = self.options_channels['on_state'][0]
@@ -227,10 +223,10 @@ class OutputModule(AbstractOutput):
                     startup_state = not self.options_channels['on_state'][0]
 
                 self.output_setup = True
-                self.bus.write_i2c_block_data(self.address, 5, 
-                                [self.options_channels['pin'][0], 
-                                 1,
-                                0])
+                # set pin direction to output
+                self.write_block(5, [self.options_channels['pin'][0], 
+                                    1,
+                                    0])
                 self.output_switch(startup_state)
 
                 if self.options_channels['trigger_functions_startup'][0]:
@@ -250,16 +246,13 @@ class OutputModule(AbstractOutput):
 
     def output_switch(self, state, output_type=None, amount=None, output_channel=0):
         try:
+            pinState = not self.options_channels['on_state'][output_channel]
             if state == 'on':
-                self.bus.write_i2c_block_data(self.address, 2, 
-                                [self.options_channels['pin'][output_channel], 
-                                 self.options_channels['on_state'][output_channel],
-                                0])
-            elif state == 'off':
-                self.bus.write_i2c_block_data(self.address, 2,
-                                [self.options_channels['pin'][output_channel],
-                                 not self.options_channels['on_state'][output_channel],
-                                 0])
+                pinState = self.options_channels['on_state'][output_channel]
+            self.write_block(2, 
+                            [self.options_channels['pin'][output_channel], 
+                            pinState,
+                            0])
             msg = "success"
         except Exception as e:
             msg = "State change error: {}".format(e)
@@ -269,12 +262,77 @@ class OutputModule(AbstractOutput):
     def is_on(self, output_channel=0):
         if self.is_setup():
             try:
-                self.bus.write_i2c_block_data(self.address, 1,
+                self.write_block(1,
                                 [self.options_channels['pin'][output_channel], 0, 0])
-                value = self.bus.read_i2c_block_data(self.address, 1, 2)
+                value = self.read_block(1, 2)
+                self.logger.debug("Returning GPIO status {}".format(value[1]))
                 return self.options_channels['on_state'][output_channel] == value[1]
             except Exception as e:
                 self.logger.error("Status check error: {}".format(e))
+
+    def write_block(self, cmd, data):
+        from smbus2 import SMBus
+        counter = 3
+        bus = None
+        msg = ""
+
+        try:
+            self.logger.debug("Opening I2C port")
+            bus = SMBus(self.output.i2c_bus)
+        except Exception as e:
+            msg = "Error opening I2C port: {}".format(e)
+            self.logger.exception(msg)
+            raise Exception(msg)
+
+        while counter > 0:
+            try:
+                self.logger.debug("Writing to I2C address {} and command {}".format(self.address, cmd))
+                bus.write_i2c_block_data(self.address, cmd, data)
+                self.logger.debug("I2C block successfully written.")
+                break
+            except Exception as e:
+                counter -= 1
+                if counter <= 0:
+                    msg = "Error writing I2C block to address {}: {}".format(self.address, e)
+                    self.logger.exception(msg)
+                    bus.close()
+                    raise Exception(msg)
+                else:
+                    time.sleep(0.005)
+        bus.close()
+
+    def read_block(self, cmd, byte_count):
+        from smbus2 import SMBus
+        counter = 3
+        value = []
+        bus = None
+        msg = ""
+
+        try:
+            self.logger.debug("Opening I2C port")
+            bus = SMBus(self.output.i2c_bus)
+        except Exception as e:
+            msg = "Error opening I2C port: {}".format(e)
+            self.logger.exception(msg)
+            raise Exception(msg)
+
+        while counter > 0:
+            try:
+                self.logger.debug("Reading from I2C address {} and command {}".format(self.address, cmd))
+                value = bus.read_i2c_block_data(self.address, cmd, byte_count)
+                self.logger.debug("I2C block successfully read.")
+                break
+            except Exception as e:
+                counter -= 1
+                if counter <= 0:
+                    msg = "Error reading I2C block from address {}: {}".format(self.address, e)
+                    self.logger.exception(msg)
+                    bus.close()
+                    raise Exception(msg)
+                else:
+                    time.sleep(0.005)
+        bus.close()
+        return value
 
     def is_setup(self):
         return self.output_setup
