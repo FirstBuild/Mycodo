@@ -229,3 +229,4 @@ docs-old/_build/
 
 # PyBuilder
 target/
+default.vim
